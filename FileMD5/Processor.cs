@@ -1,274 +1,143 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using System.Diagnostics;
 using System.IO;
+using System.Text;
+using System.Threading;
 using Trinet.Core.IO.Ntfs;
-using System.Security.Cryptography;
-using System.Reflection;
 
 namespace FileMD5
 {
-	public class Processor
+	public partial class Processor
 	{
 		const string FileCheckedMarkerStreamName = "MD5";
 		const string FileDateTimeLastCheckStreamName = "MD5-Last-Check-DateTime";
+		const string ProcessingPrefix = "Processing: ";
 		const string ExtractExtension = ".MD5";
 		const string WrongExtension = ".!!!WrongMD5!!!";
-		private static List<string> Work = new List<string>();
+		private static readonly List<string> Work = new List<string>();
 		private static string ExtractDir = null;
 		private static string ExtractFullPath = null;
 
 		private static string CurTopDir;
 
-		private static bool WorkCheck = false;
-		private static bool WorkMD5 = false;
-		private static bool WorkOkPlus = false;
-		private static bool WorkOkMinus = false;
-		private static bool WorkRen = false;
-		private static bool WorkSubFolders = false;
-		private static bool WorkPause = false;
-		private static bool WorkRemove = false;
-		private static bool WorkExtract = false;
+		private static bool CheckMD5Option = false;
+		private static bool SetMD5Option = false;
+		private static bool OkPlusOption = false;
+		private static bool OkMinusOption = false;
+		private static bool RenameOption = false;
+		private static bool OfflineAttributeOption = false;
+		private static bool SubFoldersOption = false;
+		private static bool PauseOption = false;
+		private static bool BeepOption = false;
+		private static bool RemoveOption = false;
+		private static bool ExtractOption = false;
+
+		private volatile static int TotalProcessedFilesCounter = 0;
+		private volatile static int MissingMd5FilesCounter = 0;
+		private volatile static int WrongMd5FilesCounter = 0;
+		private volatile static int SetMd5FilesCounter = 0;
+		private volatile static int RemovedMd5FilesCounter = 0;
+		private volatile static int ErrorFilesCounter = 0;
+
+		private static StringBuilder ProcessText;
+		private static StringBuilder CleanText;
+
+		public static object StringBuider { get; private set; }
 
 		public int Run( string[] args )
 		{
-			Console.WriteLine( "FileMD5 - Контроль целостности файлов.  Используйте ключ -? для справки." );
+			string text = "FileMD5 - Контроль целостности файлов.  Используйте ключ -? для справки.";
+			Console.WriteLine( text );
+			// Если либо стандартный вывод, либо вывод ошибок перенаправлен в файл, то дублируем вывод сообщения в оба канала
+			if( Console.IsErrorRedirected != Console.IsOutputRedirected )
+				Console.Error.WriteLine( text );
 
-			bool fault = false;
-			fault = ProcessArguments( args );
-			if( !WorkMD5 && !WorkRemove ) WorkCheck = true;
-			if( !WorkOkMinus ) WorkOkPlus = true;
+			bool fault = ProcessArguments( args );
+			if( !SetMD5Option && !RemoveOption ) CheckMD5Option = true;
+			if( !OkMinusOption ) OkPlusOption = true;
 
 			if( !fault )
 			{
+				ProcessText = new StringBuilder( Console.WindowWidth );
+				CleanText = new StringBuilder( "\r".PadLeft( Console.WindowWidth - 1 ) );
+
 				if( Work.Count == 0 )
 				{
 					Work.Add( Environment.CurrentDirectory );
-					Console.WriteLine( "Директория для обработки не задана, обрабатывается текущая" );
+					text = "Файл или директория в параметре не заданы, обрабатывается текущая директория";
+					Console.WriteLine( text );
+					if( Console.IsErrorRedirected != Console.IsOutputRedirected )
+						Console.Error.WriteLine( text );
 				}
-				foreach( string s in Work )
+				Stopwatch timer = Stopwatch.StartNew();
+				int workCounter = 0;
+				foreach( string processingItem in Work )
 				{
-					Process( s );
+					workCounter++;
+					text = string.Format(
+						"\r\nЭлемент обработки {0} №{1}: {2}\r\n",
+						SubFoldersOption ? "(с поддиректориями)" : "(без поддиректорий)",
+						workCounter,
+						processingItem );
+					Console.WriteLine( text );
+					if( Console.IsErrorRedirected != Console.IsOutputRedirected )
+						Console.Error.WriteLine( text );
+
+
+					ProcessWorkItem( processingItem );
 				}
+
+				text =
+					$"\r\nОбработка завершена за {timer.Elapsed}\r\n" +
+					$"Всего обработано файлов: {TotalProcessedFilesCounter}  из них:\r\n" +
+					$"Ошибок обработки файла:  {ErrorFilesCounter}\r\n" +
+					$"Установлен хеш:          {SetMd5FilesCounter}\r\n" +
+					$"Удален хеш:              {RemovedMd5FilesCounter}\r\n" +
+					$"Отсутствует хеш:         {MissingMd5FilesCounter}\r\n" +
+					$"Неправильный хеш:        {WrongMd5FilesCounter}\r\n"
+					;
+				Console.WriteLine( text );
+				if( Console.IsErrorRedirected != Console.IsOutputRedirected )
+					Console.Error.WriteLine( text );
 			}
-			if( WorkPause )
+			if( BeepOption )
 			{
-				Console.WriteLine( "Нажмите любую кнопку для завершения" );
+				Console.Beep();
+			}
+			if( PauseOption )
+			{
+				text = "Нажмите любую кнопку для завершения";
+				// Пытаемся вывести сообщение на консоль, а не в перенаправленный поток
+				if( !Console.IsOutputRedirected )
+					Console.WriteLine( text );
+				else
+				if( !Console.IsErrorRedirected )
+					Console.Error.WriteLine( text );
+				else
+					Console.WriteLine( text );
+
 				Console.ReadKey( true );
 			}
 
 			return fault ? 1 : 0;
 		}
 
-		private static bool ProcessArguments( string[] args )
+		private static void ProcessWorkItem( string entryName )
 		{
-			bool fault = false;
-			bool catchExtract = false;
-			bool catchDo = false;
-
-			foreach( string s in args )
-			{
-				if( catchExtract )
-				{
-					ExtractDir = s;
-					catchExtract = false;
-					bool dirExists = false;
-					try
-					{
-						dirExists = Directory.Exists( s );
-						if( !dirExists )
-							dirExists = Directory.Exists( Path.GetDirectoryName( s ) );
-						if( !dirExists )
-							dirExists = Directory.Exists( Path.GetDirectoryName( Path.GetDirectoryName( s ) ) );
-						ExtractFullPath = Path.GetFullPath( ExtractDir );
-					}
-					catch { }
-					if( !dirExists )
-					{
-						Console.WriteLine( "Директория из параметра -extract не существует" );
-						fault = true;
-					}
-				}
-				else
-				{
-					if( s.StartsWith( "-" ) || s.StartsWith( "/" ) )
-					{
-						switch( s.ToLower() )
-						{
-						case "-?":
-						case "/?":
-						case "-h":
-						case "/h":
-						case "-help":
-						case "/help":
-							Console.WriteLine( "FileMD5 считает хэшы файлов по алгоритму MD5, сохраняя их отдельными" );
-							Console.WriteLine( "потоками в самих файлах (поддерживается только для NTFS)." );
-							Console.WriteLine( "При проверке целостности проверяется наличие хэша MD5, сохраненного ранее" );
-							Console.WriteLine( "в отдельном потоке в файле; при отсутствии сохраненного ранее хэша MD5" );
-							Console.WriteLine( "или при его отличии от текущего рассчитанного хэша выдается ошибка." );
-							Console.WriteLine( "" );
-							Console.WriteLine( "Вызов программы:" );
-							Console.WriteLine( "FileMD5 [parameter1] [...parameterN] [folder or file 1] [...folder or file N]" );
-							Console.WriteLine( "folder or file - название папки для обработки всех входящих в нее файлов" );
-							Console.WriteLine( "                 или маска файлов, например *.jpg, для обработки" );
-							Console.WriteLine( "                 отдельных файлов; может содержать полный или краткий путь" );
-							Console.WriteLine( "Ключи:" );
-							Console.WriteLine( "  -?      - текущая справка о программе" );
-							Console.WriteLine( "  -h      - текущая справка о программе" );
-							Console.WriteLine( "  -help   - текущая справка о программе" );
-							Console.WriteLine( "  -md5    - считается хэш файла по алгориту MD5; если указан" );
-							Console.WriteLine( "            параметр -extract, то хэш пишется в файл в директории его параметра dir" );
-							Console.WriteLine( "            (см. параметр -extract), иначе хэш пишется" );
-							Console.WriteLine( "            в исходный файл дополнительным потоком (только для NTFS)" );
-							Console.WriteLine( "  -check  - считается текущий хэш файла и сравнивается с сохраненным," );
-							Console.WriteLine( "            при отличии хэша или его отсутствии - ошибка" );
-							Console.WriteLine( "  -remove - удаляет хэш MD5 и его поток из файла" );
-							Console.WriteLine( "  -ok+    - по умолчанию, для файлов без ошибок выдает сообщение" );
-							Console.WriteLine( "  -ok-    - для файлов без ошибок не выдает никаких сообщений" );
-							Console.WriteLine( "  -ren    - для файлов с ошибками добавляет в название " + WrongExtension );
-							Console.WriteLine( "  -s      - рекурентное выполнение для всех вложенных поддиректорий" );
-							Console.WriteLine( "  -pause  - пауза на ввод любого символа после выполнения всей работы" );
-							Console.WriteLine( "  -extract <dir> - в директории dir создает файл, одноименный проверяемому" );
-							Console.WriteLine( "            с добавкой .MD5, куда записывает хэш файла;" );
-							Console.WriteLine( "            при обработке директорий в dir создаются вложенные директории" );
-							Console.WriteLine( "  -do <folder or mask> - если название обрабатываемой директории начинается с" );
-							Console.WriteLine( "            минуса, перед ней надо поставить -do" );
-//							Console.WriteLine( "  -cont[inue] <datetime> пропустить файлы, в которых отметка проверки позже" );
-							Console.WriteLine( "Ключи -md5, -check и -remove взаимоисключающие," );
-							Console.WriteLine( "если ничего не указано, работает -check" );
-							return true;
-
-						case "-pause":
-							WorkPause = true;
-							break;
-
-						case "-remove":
-							if( WorkCheck )
-							{
-								Console.WriteLine( "Параметр -remove не может использоваться вместе с параметром -check" );
-								fault = true;
-							}
-							if( WorkMD5 )
-							{
-								Console.WriteLine( "Параметр -remove не может использоваться вместе с параметром -md5" );
-								fault = true;
-							}
-							WorkRemove = true;
-							break;
-
-						case "-md5":
-							if( WorkRemove )
-							{
-								Console.WriteLine( "Параметр -md5 не может использоваться вместе с параметром -remove" );
-								fault = true;
-							}
-							if( WorkCheck )
-							{
-								Console.WriteLine( "Параметр -md5 не может использоваться вместе с параметром -check" );
-								fault = true;
-							}
-							WorkMD5 = true;
-							break;
-
-						case "-check":
-							if( WorkRemove )
-							{
-								Console.WriteLine( "Параметр -check не может использоваться вместе с параметром -remove" );
-								fault = true;
-							}
-							if( WorkMD5 )
-							{
-								Console.WriteLine( "Параметр -check не может использоваться вместе с параметром -md5" );
-								fault = true;
-							}
-							WorkCheck = true;
-							break;
-
-						case "-ok+":
-							if( WorkOkMinus )
-							{
-								Console.WriteLine( "Параметр -ok+ не может использоваться вместе с параметром -ok-" );
-								fault = true;
-							}
-							WorkOkPlus = true;
-							break;
-
-						case "-ok-":
-							if( WorkOkPlus )
-							{
-								Console.WriteLine( "Параметр -ok- не может использоваться вместе с параметром -ok+" );
-								fault = true;
-							}
-							WorkOkMinus = true;
-							break;
-
-						case "-extract":
-							WorkExtract = true;
-							catchExtract = true;
-							break;
-
-						case "-ren":
-							WorkRen = true;
-							break;
-
-						case "-s":
-							WorkSubFolders = true;
-							break;
-
-						default:
-							Console.WriteLine( "Неизвестный параметр \"" + s + "\"" );
-							fault = true;
-							break;
-						}
-					}
-					else
-					{
-						catchDo = true;
-					}
-				}
-				if( catchDo )
-				{
-					if( s.IndexOfAny( Path.GetInvalidPathChars() ) >= 0 )
-					{
-						Console.WriteLine( "Недопустимый символ в параметре \"" + s + "\"" );
-						fault = true;
-					}
-					if( Path.GetDirectoryName( s ).IndexOfAny( new char[] { '?', '*' } ) >= 0 )
-					{
-						Console.WriteLine( "Путь не может содержать символы маски (? или *), маска допустима только в конце" );
-						fault = true;
-					}
-
-					Work.Add( s );
-					catchDo = false;
-				}
-			}
-			if( WorkExtract && catchExtract )
-			{
-				Console.WriteLine( "За ключем -extract должна быть указана директория" );
-				fault = true;
-			}
-			return fault;
-		}
-
-		private static void Process( string entryName )
-		{
-			Console.WriteLine( "Processing: " + entryName );
-
 			string fileName = Path.GetFileName( entryName );
 			string dirName = Path.GetDirectoryName( entryName );
-			if( String.IsNullOrEmpty( dirName ) )
+			if( string.IsNullOrEmpty( dirName ) )
 				dirName = Environment.CurrentDirectory;
 
-			if( String.IsNullOrEmpty( fileName ) )
+			if( string.IsNullOrEmpty( fileName ) )
 			{
 				CurTopDir = Path.GetDirectoryName( Path.GetFullPath( dirName ) );
 				ProcessDirectory( dirName, "*" );
 			}
 			else
 			{
-				string[] dirs = null;
+				string[] dirs;
 				try
 				{
 					dirs = Directory.GetDirectories( dirName, fileName, SearchOption.TopDirectoryOnly );
@@ -304,8 +173,8 @@ namespace FileMD5
 					{
 						if( f.IsReadOnly )
 						{
-							// Если у файла атрибут read-only работа со стримами файла дает ошибку.
-							// Сначала снимаем атрибут, затем ставим на место
+							// Если у файла атрибут read-only работа с потоками файла дает ошибку.
+							// Сначала снимаем атрибут, затем ставим на место.
 							setReadOnly = true;
 							f.IsReadOnly = false;
 						}
@@ -320,7 +189,7 @@ namespace FileMD5
 				}
 			}
 
-			if( WorkSubFolders )
+			if( SubFoldersOption )
 			{
 				entryName = Directory.GetDirectories( directoryName, mask, SearchOption.TopDirectoryOnly );
 				if( entryName != null )
@@ -339,29 +208,27 @@ namespace FileMD5
 				Path.GetFullPath( fileName ).StartsWith( ExtractFullPath ) )
 				return; // Файлы с расширением .md5 из каталога -extract исключаются
 
+			ProgressLine( fileName );
+
 			byte[] hash = null;
-
-			using( FileStream fileStream = File.OpenRead( fileName ) )
-			{
-				hash = System.Security.Cryptography.MD5.Create().ComputeHash( fileStream );
-			}
-
 			FileInfo file = new FileInfo( fileName );
 
-			if( WorkRemove && file.AlternateDataStreamExists( FileCheckedMarkerStreamName ) )
+			if( RemoveOption && file.AlternateDataStreamExists( FileCheckedMarkerStreamName ) )
 			{
 				AlternateDataStreamInfo s = file.GetAlternateDataStream( FileCheckedMarkerStreamName, FileMode.Open );
 				s.Delete();
+				Interlocked.Increment( ref RemovedMd5FilesCounter );
 
-				if( WorkOkPlus )
+				if( OkPlusOption )
 				{
+					ClearLine();
 					Console.WriteLine( "MD5 is removed:   " + GetShortName( fileName ) );
 				}
 			}
 
-			if( WorkMD5 )
+			if( SetMD5Option )
 			{
-				if( WorkExtract )
+				if( ExtractOption )
 				{
 					string extractTo = Path.Combine( ExtractDir, GetShortName( fileName ) + ExtractExtension );
 					string extractToDir = Path.GetDirectoryName( extractTo );
@@ -372,11 +239,24 @@ namespace FileMD5
 					}
 					catch( Exception ex )
 					{
-						Console.WriteLine( "Ошибка создания директория для извлечения хэшей MD5: " + extractToDir );
-						Console.WriteLine( ex.Message );
+						ClearLine();
+						Console.WriteLine( string.Concat(
+							"Ошибка создания директория для извлечения хешей MD5: ",
+							extractToDir,
+							"\r\n",
+							ex.Message ) );
 						throw;
 					}
 					StringBuilder sb = new StringBuilder();
+
+					if( hash == null )
+					{
+						using( FileStream fileStream = File.Open( fileName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite ) )
+						{
+							hash = System.Security.Cryptography.MD5.Create().ComputeHash( fileStream );
+						}
+					}
+
 					for( int i = 0; i < hash.Length; i++ )
 					{
 						sb.Append( hash[ i ].ToString( "X2" ) );
@@ -385,6 +265,14 @@ namespace FileMD5
 				}
 				else
 				{
+					if( hash == null )
+					{
+						using( FileStream fileStream = File.Open( fileName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite ) )
+						{
+							hash = System.Security.Cryptography.MD5.Create().ComputeHash( fileStream );
+						}
+					}
+
 					AlternateDataStreamInfo s = file.GetAlternateDataStream( FileCheckedMarkerStreamName, FileMode.Create );
 					using( FileStream writer = s.OpenWrite() )
 					{
@@ -398,18 +286,31 @@ namespace FileMD5
 					}
 				}
 
-				if( WorkOkPlus )
+				/*
+				 * Если при проверке файлу был установлен атрибут Offline
+				 * из-за ошибки или отсутствия хеша,
+				 * то этот атрибут надо сбросить.
+				 */
+				var attributes = File.GetAttributes( fileName );
+				if( attributes.HasFlag( FileAttributes.Offline ) )
 				{
-					Console.WriteLine( "MD5 is done:      " + GetShortName( fileName ) );
+					attributes &= ~FileAttributes.Offline;
+					File.SetAttributes( fileName, attributes );
 				}
+
+				if( OkPlusOption )
+				{
+					ClearLine();
+					Console.WriteLine( "MD5 is set:       " + GetShortName( fileName ) );
+				}
+				Interlocked.Increment( ref SetMd5FilesCounter );
 			}
 
-			if( WorkCheck )
+			if( CheckMD5Option )
 			{
-				bool wellDone = false;
 				byte[] bytes = null;
 
-				if( WorkExtract )
+				if( ExtractOption )
 				{
 					string extractTo = Path.Combine( ExtractDir, GetShortName( fileName ) + ExtractExtension );
 					try
@@ -418,13 +319,15 @@ namespace FileMD5
 					}
 					catch( Exception ex )
 					{
-						Console.WriteLine( "Ошибка чтения хэша MD5 из файла. Проверьте правильность параметра -extract и содержимое файла." );
-						Console.WriteLine( "Попытка чтения MD5 из файла: " + extractTo );
-						Console.WriteLine( ex.Message );
+						ClearLine();
+						Console.WriteLine(
+							"Ошибка чтения хеша MD5 из файла.\r\n" +
+							"Проверьте правильность параметра -extract и содержимое файла.\r\n" +
+							"Попытка чтения MD5 из файла:\r\n" +
+							$"  {extractTo}\r\n" +
+							$"{ex.Message}" );
 						throw;
 					}
-					if( bytes != null )
-						wellDone = true;
 				}
 				else
 				{
@@ -437,39 +340,67 @@ namespace FileMD5
 							{
 								bytes = new byte[ s.Size ];
 								int n = reader.Read( bytes, 0, bytes.Length );
-								if( n == bytes.Length )
-									wellDone = true;
+								if( n != bytes.Length )
+									bytes = null;
 							}
 						}
 					}
 				}
 				bool eq = true;
-				if( !wellDone )
+				if( bytes == null )
 				{
+					ClearLine();
 					Console.WriteLine( "Missing MD5:      " + GetShortName( fileName ) );
 					eq = false;
+					Interlocked.Increment( ref MissingMd5FilesCounter );
 				}
 				else
 				{
-					if( bytes != null && hash != null )
+					if( hash == null )
 					{
-						if( bytes.Length != hash.Length )
+						using( FileStream fileStream = File.Open( fileName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite ) )
 						{
-							Console.WriteLine( "Разная длина MD5: " + GetShortName( fileName ) );
-							eq = false;
+							hash = System.Security.Cryptography.MD5.Create().ComputeHash( fileStream );
 						}
-						else
+					}
+
+					if( bytes.Length != hash.Length )
+					{
+						ClearLine();
+						Console.WriteLine( "Разная длина MD5: " + GetShortName( fileName ) );
+						eq = false;
+						Interlocked.Increment( ref WrongMd5FilesCounter );
+					}
+					else
+					{
+						for( int i = 0; eq && i < bytes.Length; i++ )
+							eq = bytes[ i ] == hash[ i ];
+						if( !eq )
 						{
-							for( int i = 0; eq && i < bytes.Length; i++ )
-								eq = bytes[ i ] == hash[ i ];
-							if( !eq )
-							{
-								Console.WriteLine( "Wrong MD5:        " + GetShortName( fileName ) );
-							}
+							ClearLine();
+							Console.WriteLine( "Wrong MD5:        " + GetShortName( fileName ) );
+							Interlocked.Increment( ref WrongMd5FilesCounter );
 						}
 					}
 				}
-				if( !eq && WorkRen )
+				if( !eq && OfflineAttributeOption )
+				{
+					try
+					{
+						var attributes = File.GetAttributes( fileName );
+						attributes |= FileAttributes.Offline;
+						File.SetAttributes( fileName, attributes );
+					}
+					catch( Exception ex )
+					{
+						ClearLine();
+						Console.WriteLine( "Ошибка установки атрибута для файла " + GetShortName( fileName ) );
+						Console.WriteLine( ex.Message );
+						//throw;
+						Interlocked.Increment( ref ErrorFilesCounter );
+					}
+				}
+				if( !eq && RenameOption )
 				{
 					try
 					{
@@ -477,34 +408,27 @@ namespace FileMD5
 					}
 					catch( Exception ex )
 					{
+						ClearLine();
 						Console.WriteLine( "Ошибка переименования файла " + GetShortName( fileName ) );
 						Console.WriteLine( ex.Message );
-						throw;
+						//throw;
+						Interlocked.Increment( ref ErrorFilesCounter );
 					}
 				}
-				if( eq && WorkOkPlus )
+				if( eq && OkPlusOption )
 				{
+					ClearLine();
 					Console.WriteLine( "MD5 is OK:        " + GetShortName( fileName ) );
 				}
+				// Увеличиваем счетчик общего количества обработанных файлов
+				Interlocked.Increment( ref TotalProcessedFilesCounter );
 			}
 		}
 		private static string GetShortName( string name )
 		{
 			return MakeRelativePath( CurTopDir, name );
-			//string fullName = Path.GetFullPath( name );
-			//if( fullName.StartsWith( CurTopDir, StringComparison.CurrentCultureIgnoreCase ) )
-			//{
-			//	string s = fullName.Remove( 0, CurTopDir.Length );
-			//	while( s.StartsWith( @"\" ) )
-			//	{
-			//		if( s.Length == 1 ) return "";
-			//		s = s.Remove( 0, 1 );
-			//	}
-			//	return s;
-			//}
-			//else
-			//	return fullName;
 		}
+
 		/// <summary>
 		/// Creates a relative path from one file or folder to another.
 		/// Источник: https://stackoverflow.com/questions/275689/how-to-get-relative-path-from-absolute-path
@@ -515,10 +439,10 @@ namespace FileMD5
 		/// <exception cref="ArgumentNullException"></exception>
 		/// <exception cref="UriFormatException"></exception>
 		/// <exception cref="InvalidOperationException"></exception>
-		public static String MakeRelativePath( String fromPath, String toPath )
+		public static string MakeRelativePath( string fromPath, string toPath )
 		{
-			if( String.IsNullOrEmpty( fromPath ) ) throw new ArgumentNullException( "fromPath" );
-			if( String.IsNullOrEmpty( toPath ) ) throw new ArgumentNullException( "toPath" );
+			if( string.IsNullOrEmpty( fromPath ) ) throw new ArgumentNullException( "fromPath" );
+			if( string.IsNullOrEmpty( toPath ) ) throw new ArgumentNullException( "toPath" );
 
 			Uri fromUri = new Uri( fromPath );
 			Uri toUri = new Uri( toPath );
@@ -526,7 +450,7 @@ namespace FileMD5
 			if( fromUri.Scheme != toUri.Scheme ) { return toPath; } // path can't be made relative.
 
 			Uri relativeUri = fromUri.MakeRelativeUri( toUri );
-			String relativePath = Uri.UnescapeDataString( relativeUri.ToString() );
+			string relativePath = Uri.UnescapeDataString( relativeUri.ToString() );
 
 			if( toUri.Scheme.Equals( "file", StringComparison.InvariantCultureIgnoreCase ) )
 			{
@@ -544,10 +468,50 @@ namespace FileMD5
 			for( int index = 0; index < HexAsBytes.Length; index++ )
 			{
 				string byteValue = hexString.Substring( index * 2, 2 );
-				HexAsBytes[ index ] = byte.Parse( byteValue, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture );
+				HexAsBytes[ index ] = byte.Parse( byteValue,
+					System.Globalization.NumberStyles.HexNumber,
+					System.Globalization.CultureInfo.InvariantCulture );
 			}
 
 			return HexAsBytes;
+		}
+
+		private static void ClearLine()
+		{
+			if( !Console.IsOutputRedirected )
+			{
+				Console.Write( CleanText );
+			}
+			else
+			if( !Console.IsErrorRedirected )
+			{
+				Console.Error.Write( CleanText );
+			}
+		}
+
+		private static void ProgressLine( string filePath )
+		{
+			ProcessText.Clear();
+			ProcessText.Append( ProcessingPrefix );
+
+			int maxLen = Console.WindowWidth - ProcessingPrefix.Length - 1;
+			if( maxLen <= 0 )
+				return;
+			if( maxLen <= filePath.Length )
+				filePath = filePath.Substring( 0, maxLen );
+
+			ProcessText.Append( filePath.PadRight( maxLen ) );
+			ProcessText.Append( '\r' );
+
+			if( !Console.IsOutputRedirected )
+			{
+				Console.Write( ProcessText.ToString() );
+			}
+			else
+			if( !Console.IsErrorRedirected )
+			{
+				Console.Error.Write( ProcessText.ToString() );
+			}
 		}
 
 	}

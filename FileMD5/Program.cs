@@ -1,25 +1,27 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.IO;
-using Trinet.Core.IO.Ntfs;
-using System.Security.Cryptography;
 using System.Reflection;
 
 namespace FileMD5
 {
-	class Program
+	public class Program
 	{
 
 		static int Main( string[] args )
 		{
-			// Необходимодля рагрузки зависимых сборок из ресурсов
+			/*
+			 * Чтобы программы была из одного файла (.exe)
+			 * без дополнительных сборок (.dll),
+			 * все сборки интегрируются ресурсами в исполняемый модуль.
+			 * При обращении к сборкам обработчик по событию выдает код сборки
+			 * не из файловой системы, а из ресурса.
+			 */
 			AppDomain.CurrentDomain.AssemblyResolve += CurrentDomain_AssemblyResolve;
 
 			Processor processor = new Processor();
 			return processor.Run( args );
-			 
+
 		}
 
 		private static Assembly CurrentDomain_AssemblyResolve( object sender, ResolveEventArgs args )
@@ -37,7 +39,7 @@ namespace FileMD5
 
 			Assembly thisAssembly = Assembly.GetExecutingAssembly();
 
-			//Get the Name of the AssemblyFile
+			// Get the Name of the AssemblyFile
 			if( !name.EndsWith( ".dll" ) )
 			{
 				int index = name.IndexOf( ',' );
@@ -46,7 +48,7 @@ namespace FileMD5
 				name += ".dll";
 			}
 
-			//Load form Embedded Resources - This Function is not called if the Assembly is in the Application Folder
+			// Take the Assembly form Embedded Resources
 			var resources = thisAssembly.GetManifestResourceNames().Where( s => s.EndsWith( name ) );
 			if( resources.Count() > 0 )
 			{

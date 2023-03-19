@@ -6,11 +6,11 @@ using System.Runtime.InteropServices;
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
 [assembly: AssemblyTitle( "FileMD5" )]
-[assembly: AssemblyDescription( "" )]
+[assembly: AssemblyDescription( "Программа проверки целостности и неизменности файлов с использованием потоков NTFS" )]
 [assembly: AssemblyConfiguration( "" )]
 [assembly: AssemblyCompany( "" )]
 [assembly: AssemblyProduct( "FileMD5" )]
-[assembly: AssemblyCopyright( "Copyright © Victor Loktev 2022" )]
+[assembly: AssemblyCopyright( "Copyright © Victor Loktev 2023" )]
 [assembly: AssemblyTrademark( "" )]
 [assembly: AssemblyCulture( "" )]
 
@@ -32,5 +32,5 @@ using System.Runtime.InteropServices;
 // You can specify all the values or you can default the Build and Revision Numbers 
 // by using the '*' as shown below:
 // [assembly: AssemblyVersion("1.0.*")]
-[assembly: AssemblyVersion( "2022.03.16.01" )]
-[assembly: AssemblyFileVersion( "2022.03.16.01" )]
+[assembly: AssemblyVersion( "2023.03.19.02" )]
+[assembly: AssemblyFileVersion( "2023.03.19.02" )]
